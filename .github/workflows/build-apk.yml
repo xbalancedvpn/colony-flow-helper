@@ -34,8 +34,15 @@ jobs:
       - name: Keep debug signing key for later test updates
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: cf-helper-debug-signing-v1
+          path: .ci-signing/debug.keystore
+          key: cf-helper-debug-signing-v2
+
+      - name: Ensure cached test signing key exists
+        run: |
+          mkdir -p .ci-signing
+          if [ ! -f .ci-signing/debug.keystore ]; then
+            keytool -genkeypair -keystore .ci-signing/debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -53,6 +60,8 @@ jobs:
           java -ea -cp .planner-checks com.colonyhelper.overlay.PlannerChecks
 
       - name: Build debug APK
+        env:
+          CF_HELPER_DEBUG_KEYSTORE: ${{ github.workspace }}/.ci-signing/debug.keystore
         run: gradle --no-daemon :app:assembleDebug :app:lintDebug
 
       - name: Upload APK

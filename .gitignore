@@ -1,5 +1,6 @@
 .gradle/
 .planner-checks/
+.ci-signing/
 tests/fixtures/
 **/build/
 local.properties

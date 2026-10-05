@@ -34,7 +34,7 @@ Android overlay helper for Colony Flow. The helper reads a screen capture and su
 
 Columns are numbered left to right in the current visible layout. If four columns shrink to three, the helper renumbers the three remaining visible columns.
 
-The build caches its debug signing key for later test updates. If Android refuses an update because the signing key differs, uninstall the older helper and install the new APK.
+The v0.3 build explicitly generates and caches its test signing key. The earlier default key path did not persist, so uninstall v0.2 before installing v0.3. Later builds can reuse the v0.3 key while the build cache remains available. If Android refuses an update because the key differs, uninstall the older helper and install the new APK.
 
 ## Meaning of the prediction
 
