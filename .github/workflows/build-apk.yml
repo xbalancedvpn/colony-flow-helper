@@ -49,7 +49,7 @@ jobs:
       - name: Check planner outcomes
         run: |
           mkdir -p .planner-checks
-          javac -d .planner-checks app/src/main/java/com/colonyhelper/overlay/MovePlanner.java app/src/main/java/com/colonyhelper/overlay/BoardVision.java tests/PlannerChecks.java
+          javac -d .planner-checks app/src/main/java/com/colonyhelper/overlay/MovePlanner.java app/src/main/java/com/colonyhelper/overlay/BoardVision.java tests/*.java
           java -ea -cp .planner-checks com.colonyhelper.overlay.PlannerChecks
 
       - name: Build debug APK

@@ -18,11 +18,13 @@ public final class BoardAnalyzer {
     public static final class AnalysisResult {
         public final String headline, detail;
         public final int column;
+        public final float targetX;
         public final boolean temporaryPark;
-        public AnalysisResult(String headline, String detail) { this(headline, detail, -1, false); }
-        AnalysisResult(String headline, String detail, int column, boolean temporaryPark) {
+        public AnalysisResult(String headline, String detail) { this(headline, detail, -1, false, -1); }
+        AnalysisResult(String headline, String detail, int column, boolean temporaryPark, float targetX) {
             this.headline = headline; this.detail = detail;
             this.column = column; this.temporaryPark = temporaryPark;
+            this.targetX = targetX;
         }
     }
     private BoardAnalyzer() {}
@@ -56,7 +58,12 @@ public final class BoardAnalyzer {
                             int[] pixels = new int[image.getWidth() * image.getHeight()];
                             image.getPixels(pixels, 0, image.getWidth(), 0, 0, image.getWidth(), image.getHeight());
                             BoardVision.Reading reading = BoardVision.read(image.getWidth(), image.getHeight(), pixels, adjusted);
-                            if (reading.presentCount < 12 || reading.palette.length == 0) {
+                            if (!reading.gridReliable) {
+                                callback.onResult(new AnalysisResult("WAIT / RESCAN - tile spacing uncertain",
+                                        "The grid could not be read reliably. Keep the whole game visible and wait for a still board."));
+                            } else if (!reading.queueStable) {
+                                callback.onResult(new AnalysisResult("WAIT - queue is moving", "Let the boxes finish shifting, then Analyze again."));
+                            } else if (reading.presentCount < 12 || reading.palette.length == 0) {
                                 callback.onResult(new AnalysisResult("Board not detected", "Keep the whole portrait game visible and wait for the board to stop moving, then rescan."));
                             } else {
                                 callback.onResult(format(reading, MovePlanner.analyze(reading.snapshot(reserveOne)), reserveOne));
@@ -72,6 +79,21 @@ public final class BoardAnalyzer {
                     recognizer.close(); ocr.recycle();
                     callback.onResult(new AnalysisResult("Numbers not readable", "Wait until all three rows are still, then Analyze again."));
                 });
+    }
+
+    public static boolean isMoving(Bitmap before, Bitmap after) {
+        if (before.getWidth() != after.getWidth() || before.getHeight() != after.getHeight()) return true;
+        int w = 180, h = Math.round(before.getHeight() * (w / (float) before.getWidth()));
+        Bitmap a = Bitmap.createScaledBitmap(before, w, h, true);
+        Bitmap b = Bitmap.createScaledBitmap(after, w, h, true);
+        try {
+            int[] pa = new int[w*h], pb = new int[w*h];
+            a.getPixels(pa, 0, w, 0, 0, w, h); b.getPixels(pb, 0, w, 0, 0, w, h);
+            return BoardVision.isMoving(w, h, pa, pb);
+        } finally {
+            if (a != before) a.recycle();
+            if (b != after) b.recycle();
+        }
     }
 
     private static List<BoardVision.Token> tokens(Text text, float scale, int offsetY) {
@@ -94,8 +116,15 @@ public final class BoardAnalyzer {
             detail.append("Let any active ants finish. No reliable short recovery was found in these visible rows.\n\n");
         } else {
             headline = "COLUMN " + (best.column + 1) + " - " + best.label();
-            detail.append(best.immediate ? "LIKELY CLEAR NOW" : "TEMPORARY PARK")
+            detail.append(best.immediate ? "LIKELY CLEAR AFTER ANTS FINISH" : "TEMPORARY PARK")
                     .append("\nTap the front block in column ").append(best.column + 1).append(".\n");
+            detail.append("Estimated collection: ~").append(best.requested - best.remainingAfterFirst)
+                    .append("/").append(best.requested).append("; ~").append(best.remainingAfterFirst)
+                    .append(" left without another click.\n");
+            for (MovePlanner.Work waiting : best.waitingAfterFirst)
+                detail.append("Waiting slot ").append(-waiting.id).append(" (")
+                        .append(BoardVision.colorName(reading.palette[waiting.color])).append("): ~")
+                        .append(waiting.remaining).append(" left after this click.\n");
             if (best.group.size() > 1) detail.append("Linked group: ").append(best.group.size()).append(" blocks enter together.\n");
             detail.append("Estimated peak: ").append(best.peakSlots).append("/5 slots.\n");
             if (!best.immediate) {
@@ -110,6 +139,8 @@ public final class BoardAnalyzer {
             detail.append("\n");
         }
         detail.append("SLOTS: ").append(plan.slotsUsed).append("/5").append(reserveOne ? " | keeping 1 free" : " | all 5 allowed")
+                .append("\nBOARD: ").append(reading.gridSize).append(" x ").append(reading.gridSize)
+                .append(" | ").append(reading.columns.length).append(" visible column(s)")
                 .append("\nREAD CONFIDENCE: ").append(reading.confidence).append(" (numbers/colors)")
                 .append("\n\nQUEUE (row 1 -> row 2 -> row 3)\n");
         for (int c = 0; c < reading.columns.length; c++) {
@@ -126,12 +157,17 @@ public final class BoardAnalyzer {
             detail.append("C").append(candidate.column + 1).append(": ");
             if (candidate.recommended) detail.append(candidate.reason).append("; peak ").append(candidate.peakSlots).append("/5");
             else detail.append(candidate.reason);
+            if (candidate.simulated)
+                detail.append("; ~").append(candidate.requested - candidate.remainingAfterFirst).append("/")
+                        .append(candidate.requested).append(" collected, ~").append(candidate.remainingAfterFirst).append(" left");
             detail.append("\n");
         }
         for (String issue : reading.issues) detail.append("\n").append(issue);
         detail.append("\n\nEstimates use the 3 visible rows and up to 4 clicks. Parking advice needs a return within 2 more clicks. " +
-                "Wait for ants to settle, then rescan after ONE move. Hidden boxes, covered links, and animation can change the result.");
-        return new AnalysisResult(headline, detail.toString(), best == null ? -1 : best.column, best != null && !best.immediate);
+                "The model tries nearby targets through open paths from the nest, including the perimeter. " +
+                "Wait for ants to finish, then rescan after ONE move. Target order, hidden boxes, covered links, and animation can change the result.");
+        return new AnalysisResult(headline, detail.toString(), best == null ? -1 : best.column, best != null && !best.immediate,
+                best == null ? -1 : reading.columnX[best.column]);
     }
 
     private static String groupLabel(BoardVision.Reading reading, int group) {

@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Reads all 3 visible rows, connected blocks, and waiting slots. Recommends a column and checks short return routes before suggesting temporary parking. You tap the game yourself.");
+        subtitle.setText("Predicts collection through open ant paths, reads up to 3 rows and connected blocks, and checks short return routes. Shows the column to tap and estimated remaining counts. You tap the game yourself.");
         subtitle.setTextSize(16);
         subtitle.setTextColor(Color.DKGRAY);
         subtitle.setGravity(Gravity.CENTER);
@@ -82,7 +82,7 @@ public class MainActivity extends Activity {
         root.addView(status, matchWrap());
 
         TextView note = new TextView(this);
-        note.setText("V0.2 looks up to 4 clicks ahead, with parking limited to 2 more clicks. Choose Entire screen when Android asks. In the game, wait for ants to settle and Analyze again after each move. Predictions cover the visible 3-row portrait layout.");
+        note.setText("V0.3 detects tile spacing and recentered columns, and checks two frames for movement. It looks up to 4 clicks ahead, with new parking limited to 2 more clicks. Choose Entire screen when Android asks. Wait for ants to finish and Analyze again after each move.");
         note.setTextSize(13);
         note.setTextColor(Color.GRAY);
         note.setPadding(0, dp(18), 0, 0);

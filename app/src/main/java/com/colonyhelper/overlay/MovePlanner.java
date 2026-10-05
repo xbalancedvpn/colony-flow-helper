@@ -66,8 +66,9 @@ public final class MovePlanner {
         public final List<Box> group = new ArrayList<>();
         public final List<Box> route = new ArrayList<>();
         public final List<String> parked = new ArrayList<>();
-        public boolean recommended, immediate;
-        public int followups = -1, peakSlots, remainingAfterFirst, removed;
+        public final List<Work> waitingAfterFirst = new ArrayList<>();
+        public boolean recommended, immediate, simulated;
+        public int followups = -1, peakSlots, remainingAfterFirst, requested, removed;
         public String reason = "No short recovery route in the visible rows";
         double score = -Double.MAX_VALUE;
 
@@ -121,17 +122,21 @@ public final class MovePlanner {
             if (head == null) continue;
             Candidate candidate = new Candidate(c);
             candidate.group.addAll(group(initial, head));
+            for (Box b : candidate.group) if (b.count > 0) candidate.requested += b.count;
             String blocked = blockedReason(initial, head);
             if (blocked != null) { candidate.reason = blocked; candidates.add(candidate); continue; }
 
             State first = take(initial, head, false);
             State otherFirst = take(initial, head, true);
+            candidate.simulated = true;
             candidate.peakSlots = Math.max(first.peak, otherFirst.peak);
             candidate.remainingAfterFirst = Math.max(remaining(first, head.group), remaining(otherFirst, head.group));
             for (Box box : candidate.group) {
                 int rem = Math.max(remainingBox(first, box.id), remainingBox(otherFirst, box.id));
                 if (rem > 0) candidate.parked.add(box.name + " ~" + rem + " left");
             }
+            for (Work work : input.active) candidate.waitingAfterFirst.add(new Work(work.id, work.color,
+                    Math.max(remainingBox(first, work.id), remainingBox(otherFirst, work.id)), work.group));
             candidate.immediate = !hasGroup(first, head.group) && !hasGroup(otherFirst, head.group);
             SearchResult result = search(first, initial, head);
             if (result != null) {
@@ -144,7 +149,7 @@ public final class MovePlanner {
                 candidate.peakSlots = Math.max(result.state.peak, verified.peak);
                 candidate.removed = Math.min(result.state.removed, verified.removed);
                 candidate.score = result.score;
-                candidate.reason = candidate.immediate ? "Estimated to clear now" :
+                candidate.reason = candidate.immediate ? "Estimated to clear without another click" :
                         "Temporary park; recovery in " + candidate.followups + " more click(s)";
             } else {
                 candidate.reason = "Avoid parking: no verified short return route in the visible rows";
@@ -276,16 +281,17 @@ public final class MovePlanner {
 
     private void settle(State state, boolean reverse) {
         boolean progress;
+        int[] distances = new int[(input.width + 2) * (input.height + 2)], queue = new int[distances.length];
         do {
             progress = false;
-            boolean[] outside = outside(state.cells, input.width, input.height);
-            for (Work work : state.active) {
+            walkingDistances(state.cells, input.width, input.height, distances, queue);
+            // Colonies work concurrently. Give each active color one target per round.
+            for (int n = 0; n < state.active.size(); n++) {
+                Work work = state.active.get(reverse ? state.active.size() - 1 - n : n);
                 if (work.color < 0 || work.remaining <= 0) continue;
-                for (int n = 0; n < state.cells.length && work.remaining > 0; n++) {
-                    int i = reverse ? n : state.cells.length - 1 - n;
-                    if (state.cells[i] == work.color && exposed(i, state.cells, outside, input.width, input.height)) {
-                        state.cells[i] = -1; work.remaining--; state.removed++; progress = true;
-                    }
+                int i = nearestTarget(state.cells, input.width, input.height, work.color, distances, reverse);
+                if (i >= 0) {
+                    state.cells[i] = -1; work.remaining--; state.removed++; progress = true;
                 }
             }
         } while (progress);
@@ -293,6 +299,61 @@ public final class MovePlanner {
         for (Work w : state.active) if (w.remaining > 0) unfinished.add(w.group);
         // Reserve all members of a linked group until every member finishes.
         state.active.removeIf(w -> !unfinished.contains(w.group));
+    }
+
+    private static void walkingDistances(int[] cells, int width, int height, int[] distances, int[] queue) {
+        int pw = width + 2, ph = height + 2;
+        Arrays.fill(distances, -1);
+        int first = 0, last = 0, source = (ph - 1) * pw + (width + 1) / 2;
+        distances[source] = 0; queue[last++] = source;
+        if (width % 2 == 0) { distances[source + 1] = 0; queue[last++] = source + 1; }
+        while (first < last) {
+            int i = queue[first++], x = i % pw, y = i / pw;
+            if (x > 0) last = walk(i - 1, i, cells, width, height, distances, queue, last);
+            if (x + 1 < pw) last = walk(i + 1, i, cells, width, height, distances, queue, last);
+            if (y > 0) last = walk(i - pw, i, cells, width, height, distances, queue, last);
+            if (y + 1 < ph) last = walk(i + pw, i, cells, width, height, distances, queue, last);
+        }
+    }
+
+    private static int walk(int i, int from, int[] cells, int width, int height,
+                            int[] distances, int[] queue, int last) {
+        if (distances[i] >= 0) return last;
+        int pw = width + 2, x = i % pw - 1, y = i / pw - 1;
+        if (x >= 0 && x < width && y >= 0 && y < height && cells[y * width + x] >= 0) return last;
+        distances[i] = distances[from] + 1; queue[last++] = i;
+        return last;
+    }
+
+    private static int nearestTarget(int[] cells, int width, int height, int color, int[] distances, boolean reverse) {
+        int best = -1, bestDistance = Integer.MAX_VALUE, bestCenter = Integer.MAX_VALUE;
+        int pw = width + 2;
+        for (int i = 0; i < cells.length; i++) if (cells[i] == color) {
+            int x = i % width, y = i / width, p = (y + 1) * pw + x + 1;
+            int d = Integer.MAX_VALUE;
+            if (distances[p - 1] >= 0) d = Math.min(d, distances[p - 1] + 1);
+            if (distances[p + 1] >= 0) d = Math.min(d, distances[p + 1] + 1);
+            if (distances[p - pw] >= 0) d = Math.min(d, distances[p - pw] + 1);
+            if (distances[p + pw] >= 0) d = Math.min(d, distances[p + pw] + 1);
+            if (d == Integer.MAX_VALUE) continue;
+            int center = Math.abs(2 * x - width + 1);
+            if (best < 0 || d < bestDistance || d == bestDistance && (center < bestCenter ||
+                    center == bestCenter && (y > best / width || y == best / width &&
+                            (reverse ? x > best % width : x < best % width)))) {
+                best = i; bestDistance = d; bestCenter = center;
+            }
+        }
+        return best;
+    }
+
+    /** Local calibration preview: no input mutation, animation timing, or automated tap. */
+    static int[] projectCells(int[] original, int width, int height, int color, int count, boolean reverse) {
+        Snapshot input = new Snapshot(width, height, original, new Box[0][], Collections.emptyList(), 0, false);
+        MovePlanner planner = new MovePlanner(input);
+        State state = new State(); state.cells = original.clone();
+        state.active.add(new Work(0, color, count, 0));
+        planner.settle(state, reverse);
+        return state.cells;
     }
 
     static boolean[] outside(int[] cells, int width, int height) {

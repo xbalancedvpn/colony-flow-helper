@@ -8,8 +8,6 @@ import java.util.List;
 
 /** Pixel and OCR geometry shared by Android and the reference-image checks. */
 public final class BoardVision {
-    public static final int GRID = 36;
-    private static final float[] COLUMN_X = {.269f, .423f, .577f, .730f};
     private static final float[] ROW_Y = {.707f, .779f, .841f};
     private static final float[] SLOT_X = {.191f, .345f, .500f, .654f, .808f};
 
@@ -25,13 +23,16 @@ public final class BoardVision {
 
     public static final class Reading {
         public int[] cells, palette;
+        public float[] columnX;
         public MovePlanner.Box[][] columns;
         public final List<MovePlanner.Work> active = new ArrayList<>();
         public final List<String> issues = new ArrayList<>();
         public int opaqueSlots, occupiedSlots, numbersRead, presentCount, linksRead, unknownColors;
+        public int gridSize, boxesRead;
+        public boolean gridReliable, queueStable = true;
         public String confidence;
         public MovePlanner.Snapshot snapshot(boolean reserveOne) {
-            return new MovePlanner.Snapshot(GRID, GRID, cells, columns, active, opaqueSlots, reserveOne);
+            return new MovePlanner.Snapshot(gridSize, gridSize, cells, columns, active, opaqueSlots, reserveOne);
         }
     }
 
@@ -50,21 +51,29 @@ public final class BoardVision {
 
     private Reading read() {
         Reading out = new Reading();
-        int[] colors = new int[GRID * GRID];
+        Grid grid = detectGrid();
+        out.gridSize = grid.size;
+        out.gridReliable = grid.reliable;
+        int[] colors = new int[grid.size * grid.size];
         boolean[] present = new boolean[colors.length];
         double left = (int) (width * .116), top = (int) (height * .158);
-        double cw = ((int) (width * .885) - left) / GRID;
-        double ch = ((int) (height * .456) - top) / GRID;
-        for (int r = 0; r < GRID; r++) for (int c = 0; c < GRID; c++) {
+        double cw = grid.cellWidth, ch = grid.cellHeight;
+        int background = backgroundColor();
+        for (int r = 0; r < grid.size; r++) for (int c = 0; c < grid.size; c++) {
             double xa = left + c * cw, ya = top + r * ch;
             int x = (int) Math.round(xa + cw / 2), y = (int) Math.round(ya + ch / 2);
-            int rgb = pixel(x, y), i = r * GRID + c;
+            int rgb = pixel(x, y), i = r * grid.size + c;
             colors[i] = rgb;
             double contrast = Math.max(Math.max(distance(rgb, pixel((int) Math.round(xa + cw * .12), y)),
                     distance(rgb, pixel((int) Math.round(xa + cw * .88), y))),
                     Math.max(distance(rgb, pixel(x, (int) Math.round(ya + ch * .12))),
                             distance(rgb, pixel(x, (int) Math.round(ya + ch * .88)))));
-            present[i] = contrast >= 8;
+            // A neighboring tile's shadow is not another tile on the beige board floor.
+            double interior = Math.max(Math.max(distance(rgb, pixel((int) Math.round(xa + cw * .32), y)),
+                    distance(rgb, pixel((int) Math.round(xa + cw * .68), y))),
+                    Math.max(distance(rgb, pixel(x, (int) Math.round(ya + ch * .32))),
+                            distance(rgb, pixel(x, (int) Math.round(ya + ch * .68)))));
+            present[i] = contrast >= 8 && interior < 38 && !looksLikeFloor(rgb, background);
             if (present[i]) out.presentCount++;
         }
         out.palette = palette(colors, present);
@@ -75,49 +84,62 @@ public final class BoardVision {
         // Use OCR medians to absorb small vertical shifts, without moving a row on one bad token.
         for (int r = 0; r < 3; r++) {
             List<Integer> ys = new ArrayList<>();
-            for (int c = 0; c < 4; c++) {
-                Token token = numberToken(COLUMN_X[c], rows[r], .066f, .028f);
-                if (token != null) ys.add(token.y());
-            }
+            for (Token token : tokens) if (number(token.text) > 0 && token.x() > width * .15 &&
+                    token.x() < width * .85 && Math.abs(token.y() / (float) height - rows[r]) < .028f &&
+                    token.right - token.left < width * .14) ys.add(token.y());
             if (ys.size() >= 2) { Collections.sort(ys); rows[r] = ys.get(ys.size() / 2) / (float) height; }
         }
-        int[] counts = new int[12], boxColors = new int[12], group = new int[12];
-        boolean[] hidden = new boolean[12];
+        float[] xs = detectColumns(rows);
+        out.columnX = xs;
+        int nc = xs.length;
+        int[] counts = new int[3 * nc], boxColors = new int[3 * nc], group = new int[3 * nc];
+        boolean[] hidden = new boolean[3 * nc], boxes = new boolean[3 * nc];
         Arrays.fill(counts, -1); Arrays.fill(boxColors, -1);
-        for (int r = 0; r < 3; r++) for (int c = 0; c < 4; c++) {
-            int id = r * 4 + c; group[id] = id;
-            Token token = numberToken(COLUMN_X[c], rows[r], .066f, .026f);
+        for (int r = 0; r < 3; r++) for (int c = 0; c < nc; c++) {
+            int id = r * nc + c; group[id] = id;
+            Token token = numberToken(xs[c], rows[r], .060f, .026f);
+            boxes[id] = token != null || boxPresent(xs[c], rows[r]);
+            if (!boxes[id]) continue;
+            out.boxesRead++;
             if (token != null) { counts[id] = number(token.text); out.numbersRead++; }
-            int rgb = faceColor(COLUMN_X[c], rows[r], .056f, .024f, .012f);
+            int rgb = faceColor(xs[c], rows[r], .056f, .024f, .012f);
             boxColors[id] = nearestHsv(rgb, out.palette);
             if (boxColors[id] < 0) out.unknownColors++;
         }
 
         // A connector must contrast with the nearby background, not merely be colorful.
-        for (int r = 0; r < 2; r++) for (int c = 0; c < 4; c++) {
+        for (int r = 0; r < 2; r++) for (int c = 0; c < nc; c++) {
             float y = r == 0 ? rows[r] + (rows[r + 1] - rows[r]) * .62f :
                     rows[r] + (rows[r + 1] - rows[r]) * .50f;
-            if (bridge(COLUMN_X[c], y, true)) {
-                union(group, r * 4 + c, (r + 1) * 4 + c); out.linksRead++;
+            if (boxes[r * nc + c] && boxes[(r + 1) * nc + c] && bridge(xs[c], y, true)) {
+                union(group, r * nc + c, (r + 1) * nc + c); out.linksRead++;
             }
         }
-        for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
-            float x = (COLUMN_X[c] + COLUMN_X[c + 1]) / 2;
-            if (bridge(x, rows[r], false)) {
-                union(group, r * 4 + c, r * 4 + c + 1); out.linksRead++;
+        for (int r = 0; r < 3; r++) for (int c = 0; c < nc - 1; c++) {
+            float x = (xs[c] + xs[c + 1]) / 2;
+            if (boxes[r * nc + c] && boxes[r * nc + c + 1] && bridge(x, rows[r], false)) {
+                union(group, r * nc + c, r * nc + c + 1); out.linksRead++;
             }
         }
         // Only flag an off-screen continuation if its narrow colored bar is still visible.
-        for (int c = 0; c < 4; c++) {
+        for (int c = 0; c < nc; c++) {
             float y = rows[2] + .035f;
-            int continuationColor = nearestHsv(pixel((int) (COLUMN_X[c] * width), (int) (y * height)), out.palette);
-            if (continuationColor == boxColors[8 + c] && bridge(COLUMN_X[c], y, true)) hidden[8 + c] = true;
+            int continuationColor = nearestHsv(pixel((int) (xs[c] * width), (int) (y * height)), out.palette);
+            if (boxes[2 * nc + c] && continuationColor == boxColors[2 * nc + c] &&
+                    bridge(xs[c], y, true)) hidden[2 * nc + c] = true;
         }
-        out.columns = new MovePlanner.Box[4][3];
-        for (int c = 0; c < 4; c++) for (int r = 0; r < 3; r++) {
-            int id = r * 4 + c, color = boxColors[id];
-            out.columns[c][r] = new MovePlanner.Box(id, r, c, color, counts[id],
-                    color >= 0 ? colorName(out.palette[color]) : "Unknown color", find(group, id), hidden[id]);
+        out.columns = new MovePlanner.Box[nc][];
+        for (int c = 0; c < nc; c++) {
+            List<MovePlanner.Box> column = new ArrayList<>();
+            boolean gap = false;
+            for (int r = 0; r < 3; r++) {
+                int id = r * nc + c, color = boxColors[id];
+                if (!boxes[id]) { gap = true; continue; }
+                if (gap) out.queueStable = false;
+                column.add(new MovePlanner.Box(id, r, c, color, counts[id],
+                        color >= 0 ? colorName(out.palette[color]) : "Unknown color", find(group, id), hidden[id]));
+            }
+            out.columns[c] = column.toArray(new MovePlanner.Box[0]);
         }
 
         int[] slotColors = new int[5], slotCounts = new int[5], slotGroups = new int[5];
@@ -143,12 +165,140 @@ public final class BoardVision {
             if (knownGroup) out.active.add(new MovePlanner.Work(-1 - s, slotColors[s], slotCounts[s], -100 - groupId));
             else out.opaqueSlots++;
         }
-        if (out.numbersRead < 12) out.issues.add((12 - out.numbersRead) + " queue number(s) unreadable; those moves are excluded.");
+        if (!out.gridReliable) out.issues.add("Tile spacing is uncertain; wait for a clear board capture and rescan.");
+        if (!out.queueStable) out.issues.add("Queue rows appear to be moving; wait and rescan.");
+        if (out.numbersRead < out.boxesRead) out.issues.add((out.boxesRead - out.numbersRead) + " queue number(s) unreadable; those moves are excluded.");
         if (out.opaqueSlots > 0) out.issues.add(out.opaqueSlots + " occupied slot(s) unreadable; their space stays reserved.");
         if (out.unknownColors > 0) out.issues.add("Some box colors do not match the sampled board; rescan if labels look wrong.");
-        out.confidence = out.numbersRead == 12 && out.opaqueSlots == 0 && out.unknownColors == 0 ? "HIGH" :
-                out.numbersRead >= 8 ? "MEDIUM" : "LOW";
+        out.confidence = out.gridReliable && out.queueStable && out.numbersRead == out.boxesRead &&
+                out.boxesRead > 0 && out.opaqueSlots == 0 && out.unknownColors == 0 ? "HIGH" :
+                out.numbersRead >= Math.max(1, out.boxesRead * 2 / 3) ? "MEDIUM" : "LOW";
         return out;
+    }
+
+    private static final class Grid {
+        int size;
+        double cellWidth, cellHeight;
+        boolean reliable;
+    }
+
+    private Grid detectGrid() {
+        int left = (int) (width * .116), right = (int) (width * .885);
+        int top = (int) (height * .158), bottom = (int) (height * .456);
+        double[] px = new double[right - left - 1], py = new double[bottom - top - 1];
+        // Regular bevel lines reveal the lattice even after parts of the picture are cleared.
+        for (int x = left; x < right - 1; x++) for (int y = top; y < bottom; y += 3)
+            px[x - left] += distance(pixel(x, y), pixel(x + 1, y));
+        for (int y = top; y < bottom - 1; y++) for (int x = left; x < right; x += 3)
+            py[y - top] += distance(pixel(x, y), pixel(x, y + 1));
+        center(px); center(py);
+        int n = 16; double best = -1, second = -1;
+        for (int candidate = 16; candidate <= 64; candidate++) {
+            double score = strength(px, candidate) + strength(py, candidate);
+            if (score > best) { second = best; best = score; n = candidate; }
+            else second = Math.max(second, score);
+        }
+        double fx = refine(px, n), fy = refine(py, n);
+        Grid out = new Grid(); out.size = n;
+        out.cellWidth = px.length / fx; out.cellHeight = py.length / fy;
+        out.reliable = strength(px, fx) >= .28 && strength(py, fy) >= .23 && best > second * 1.15;
+        return out;
+    }
+
+    private static void center(double[] profile) {
+        double mean = Arrays.stream(profile).average().orElse(0);
+        for (int i = 0; i < profile.length; i++) profile[i] -= mean;
+    }
+
+    private static double strength(double[] profile, double frequency) {
+        double re = 0, im = 0, scale = 0;
+        for (int i = 0; i < profile.length; i++) {
+            double angle = 2 * Math.PI * frequency * i / profile.length;
+            re += profile[i] * Math.cos(angle); im += profile[i] * Math.sin(angle);
+            scale += Math.abs(profile[i]);
+        }
+        return scale < 1 ? 0 : Math.hypot(re, im) / scale;
+    }
+
+    private static double refine(double[] profile, int size) {
+        double best = -1, frequency = size;
+        for (int k = -12; k <= 12; k++) {
+            double f = size + k * .05, s = strength(profile, f);
+            if (s > best) { best = s; frequency = f; }
+        }
+        return frequency;
+    }
+
+    private int backgroundColor() {
+        List<Integer> rs = new ArrayList<>(), gs = new ArrayList<>(), bs = new ArrayList<>();
+        for (int y = (int) (height * .464); y < height * .474; y += 2)
+            for (int x = (int) (width * .25); x < width * .75; x += 4) {
+                int p = pixel(x, y); rs.add(red(p)); gs.add(green(p)); bs.add(blue(p));
+            }
+        Collections.sort(rs); Collections.sort(gs); Collections.sort(bs);
+        return rgb(rs.get(rs.size()/2), gs.get(gs.size()/2), bs.get(bs.size()/2));
+    }
+
+    private static boolean looksLikeFloor(int color, int background) {
+        int dr = red(color) - red(background), dg = green(color) - green(background), db = blue(color) - blue(background);
+        return distance(color, background) <= 26 || Math.max(dr, Math.max(dg, db)) - Math.min(dr, Math.min(dg, db)) < 16;
+    }
+
+    private float[] detectColumns(float[] rows) {
+        float[] best = null; double bestScore = -Double.MAX_VALUE;
+        for (int n = 1; n <= 4; n++) {
+            float[] xs = new float[n];
+            for (int c = 0; c < n; c++) xs[c] = .5f + (c - (n - 1) / 2f) * .154f;
+            double score = 0;
+            for (Token t : tokens) if (number(t.text) > 0 && t.right - t.left < width * .14 &&
+                    t.x() > width * .15 && t.x() < width * .85) {
+                boolean inRow = false;
+                for (float y : rows) if (Math.abs(t.y() / (float) height - y) < .028f) inRow = true;
+                if (!inRow) continue;
+                float d = 1;
+                for (float x : xs) d = Math.min(d, Math.abs(t.x() / (float) width - x));
+                score += d < .045f ? 8 : -8;
+            }
+            for (float x : xs) score += boxPresent(x, rows[0]) ? 4 : -5;
+            if (score > bestScore) { bestScore = score; best = xs; }
+        }
+        for (int c = 0; c < best.length; c++) {
+            List<Integer> coordinates = new ArrayList<>();
+            for (float y : rows) {
+                Token t = numberToken(best[c], y, .045f, .026f);
+                if (t != null) coordinates.add(t.x());
+            }
+            if (coordinates.size() >= 2) {
+                Collections.sort(coordinates);
+                best[c] = coordinates.get(coordinates.size()/2) / (float) width;
+            }
+        }
+        return best;
+    }
+
+    private boolean boxPresent(float x, float y) {
+        int face = faceColor(x, y, .040f, .013f, .014f);
+        int a = pixel((int) ((x - .077f) * width), (int) (y * height));
+        int b = pixel((int) ((x + .077f) * width), (int) (y * height));
+        double da = distance(face, a), db = distance(face, b);
+        return Math.min(da, db) > 22 && Math.max(da, db) > 38;
+    }
+
+    /** Compare only gameplay regions: the banner ad and floating helper are outside them. */
+    public static boolean isMoving(int w, int h, int[] before, int[] after) {
+        if (before.length != w*h || after.length != w*h) throw new IllegalArgumentException("Invalid frame pair");
+        return changed(w,h,before,after,.065,.15,.935,.58) > .002 ||
+                changed(w,h,before,after,.12,.60,.86,.66) > .006 ||
+                changed(w,h,before,after,.17,.676,.83,.858) > .010;
+    }
+
+    private static double changed(int w, int h, int[] a, int[] b, double l, double t, double r, double bottom) {
+        int changes = 0, total = 0;
+        for (int y = (int)(h*t); y < h*bottom; y++) for (int x = (int)(w*l); x < w*r; x++) {
+            if (distance(a[y*w+x], b[y*w+x]) > 45) changes++;
+            total++;
+        }
+        return total == 0 ? 0 : changes / (double) total;
     }
 
     private Token numberToken(float x, float y, float halfWidth, float halfHeight) {
@@ -292,7 +442,7 @@ public final class BoardVision {
         if (h < 220) return "Cyan";
         if (h < 255) return "Blue";
         if (h < 310) return "Purple";
-        if (h < 330 && s > .65) return "Magenta";
+        if (h < 335 && s > .40) return "Magenta";
         return s < .52 ? "Pink" : "Red";
     }
 

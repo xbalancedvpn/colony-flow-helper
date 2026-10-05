@@ -54,6 +54,7 @@ public class OverlayService extends Service {
     private Button analyzeButton;
     private CheckBox reserveSlot;
     private boolean analyzing;
+    private Bitmap referenceFrame;
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -292,7 +293,7 @@ public class OverlayService extends Service {
         analyzeButton.setEnabled(false);
         reserveSlot.setEnabled(false);
         hideMarker();
-        showResult("Reading 3 rows and connections...\nKeep the game still for a moment.");
+        showResult("Checking movement, then reading the board...\nLet the ants finish and keep the game still.");
         overlayRoot.setVisibility(View.INVISIBLE);
         try {
             Image stale = imageReader.acquireLatestImage();
@@ -307,15 +308,23 @@ public class OverlayService extends Service {
 
     private void tryCapture(int attempt) {
         if (imageReader == null) {
+            releaseReferenceFrame();
             restoreOverlay();
             finishAnalysis();
             return;
         }
-        Image image = imageReader.acquireLatestImage();
+        Image image;
+        try { image = imageReader.acquireLatestImage(); }
+        catch (IllegalStateException error) {
+            releaseReferenceFrame(); restoreOverlay(); finishAnalysis();
+            showResult("Screen capture ended. Restart the helper.");
+            return;
+        }
         if (image == null) {
             if (attempt < 5) {
                 handler.postDelayed(() -> tryCapture(attempt + 1), 90);
             } else {
+                releaseReferenceFrame();
                 restoreOverlay();
                 finishAnalysis();
                 showResult("No screen frame received. Tap Analyze again.");
@@ -337,14 +346,37 @@ public class OverlayService extends Service {
             screenshot = Bitmap.createBitmap(padded, 0, 0, captureWidth, captureHeight);
             if (padded != screenshot) padded.recycle();
         } catch (Throwable t) {
+            releaseReferenceFrame();
+            restoreOverlay();
             finishAnalysis();
             showResult("Could not decode the captured frame. Tap Analyze again.");
         } finally {
             image.close();
-            restoreOverlay();
         }
 
         if (screenshot == null) return;
+        if (referenceFrame == null) {
+            referenceFrame = screenshot;
+            handler.postDelayed(() -> tryCapture(0), 700);
+            return;
+        }
+        Bitmap before = referenceFrame;
+        referenceFrame = null;
+        boolean moving;
+        try { moving = BoardAnalyzer.isMoving(before, screenshot); }
+        catch (RuntimeException error) {
+            screenshot.recycle(); finishAnalysis();
+            showResult("Could not check movement. Wait for the ants, then Analyze again.");
+            return;
+        } finally {
+            before.recycle(); restoreOverlay();
+        }
+        if (moving) {
+            screenshot.recycle(); finishAnalysis();
+            showResult("WAIT - ants or boxes are moving\n\nLet the ants finish collecting and returning, then Analyze again. Counts during a trip can include blocks already being carried.");
+            panel.setVisibility(View.VISIBLE);
+            return;
+        }
         Bitmap finalScreenshot = screenshot;
         boolean reserveOne = reserveSlot.isChecked();
         BoardAnalyzer.analyze(screenshot, reserveOne, result -> handler.post(() -> {
@@ -353,7 +385,7 @@ public class OverlayService extends Service {
                 if (overlayRoot == null || panel == null || imageReader == null) return;
                 showResult(result.headline + "\n\n" + result.detail);
                 panel.setVisibility(View.VISIBLE);
-                if (result.column >= 0) showMarker(result.column, result.temporaryPark);
+                if (result.column >= 0) showMarker(result.column, result.targetX, result.temporaryPark);
             } finally {
                 finalScreenshot.recycle();
             }
@@ -366,9 +398,8 @@ public class OverlayService extends Service {
         if (reserveSlot != null) reserveSlot.setEnabled(true);
     }
 
-    private void showMarker(int column, boolean park) {
+    private void showMarker(int column, float targetX, boolean park) {
         hideMarker();
-        float[] xs = {.269f, .423f, .577f, .730f};
         targetMarker = new TextView(this);
         targetMarker.setText("C" + (column + 1) + " \u2193");
         targetMarker.setGravity(Gravity.CENTER);
@@ -383,7 +414,7 @@ public class OverlayService extends Service {
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.LEFT;
         params.alpha = .75f;
-        params.x = Math.round(captureWidth * xs[column]) - markerWidth / 2;
+        params.x = Math.round(captureWidth * targetX) - markerWidth / 2;
         params.y = Math.round(captureHeight * .677f) - markerHeight;
         try { windowManager.addView(targetMarker, params); }
         catch (RuntimeException error) { targetMarker = null; }
@@ -431,6 +462,7 @@ public class OverlayService extends Service {
     }
 
     private void releaseCaptureObjects() {
+        releaseReferenceFrame();
         if (virtualDisplay != null) {
             virtualDisplay.release();
             virtualDisplay = null;
@@ -439,6 +471,10 @@ public class OverlayService extends Service {
             imageReader.close();
             imageReader = null;
         }
+    }
+
+    private void releaseReferenceFrame() {
+        if (referenceFrame != null) { referenceFrame.recycle(); referenceFrame = null; }
     }
 
     @Override

@@ -32,6 +32,27 @@ public final class PlannerChecks {
             for (int x = (int)(left*w); x < (int)(right*w); x++) pixels[y*w+x] = color;
     }
 
+    private static BoardVision.Reading syntheticReading(int grid, int nc, int rows) {
+        int w=720,h=1624;int[] pixels=new int[w*h];Arrays.fill(pixels,0xfff2e2d2);
+        int l=(int)(w*.116),t=(int)(h*.158),right=(int)(w*.885),bottom=(int)(h*.456);
+        double cw=(right-l)/(double)grid,ch=(bottom-t)/(double)grid;
+        for(int y=t;y<bottom;y++) for(int x=l;x<right;x++) {
+            int c=(int)((x-l)/cw),r=(int)((y-t)/ch);
+            if(c>=grid||r>=grid)continue;
+            double fx=(x-l)/cw-c,fy=(y-t)/ch-r;
+            boolean edge=fx<.12||fx>.86||fy<.12||fy>.86;
+            pixels[y*w+x]=edge?0xff428591:(c+r)%2==0?0xff67ebf7:0xff5d4967;
+        }
+        List<BoardVision.Token> tokens=new ArrayList<>();float[] ys={.707f,.779f,.841f};
+        for(int c=0;c<nc;c++) for(int r=0;r<rows;r++) {
+            float x=.5f+(c-(nc-1)/2f)*.154f,y=ys[r];
+            fill(pixels,w,h,x-.055f,y-.022f,x+.055f,y+.022f,0xff67ebf7);
+            int xx=Math.round(x*w),yy=Math.round(y*h);
+            tokens.add(new BoardVision.Token("20",xx-18,yy-18,xx+18,yy+18));
+        }
+        return BoardVision.read(w,h,pixels,tokens);
+    }
+
     public static void main(String[] args) throws Exception {
         int[] small = ring(3, 0, 1);
         MovePlanner.Box a = b(0, 0, 0, 0, 8, 0);
@@ -85,6 +106,36 @@ public final class PlannerChecks {
                 Collections.singletonList(existing), 0, true);
         check(MovePlanner.analyze(live).best.immediate, "Existing slot colors participate in the simulation");
         check(existing.remaining == 8, "Planning does not change observed slot quotas");
+        check(MovePlanner.analyze(live).best.waitingAfterFirst.get(0).remaining==0,
+                "Advice reports an existing waiting box that finishes during the selected click");
+
+        int[] solid=new int[25];
+        int[] near=MovePlanner.projectCells(solid,5,5,0,1,false);
+        check(near[22]<0 && near[2]==0,"Ant preview starts near the nest, rather than the upper edge");
+        check(Arrays.equals(solid,new int[25]),"Target preview does not mutate the observed board");
+        int[] crown={0,1,0,0,2,0,0,0,0};
+        check(MovePlanner.analyze(puzzle(3,crown,new MovePlanner.Box[][]{{b(0,0,0,1,1,0)}},0,true)).best.immediate,
+                "Ants can walk around the perimeter to an exposed crown tile");
+        check(MovePlanner.projectCells(small,3,3,1,1,false)[4]==1,"Nearby-target model cannot enter a sealed inner color");
+        int[] tied={0,0,0,0};
+        check(!Arrays.equals(MovePlanner.projectCells(tied,4,1,0,1,false),MovePlanner.projectCells(tied,4,1,0,1,true)),
+                "Equal-distance target priority is checked in both directions");
+        int mw=180,mh=406;int[] before=new int[mw*mh],after=new int[mw*mh];
+        Arrays.fill(before,0xfff2e2d2);System.arraycopy(before,0,after,0,before.length);
+        fill(after,mw,mh,0,.93f,1,1,0xff000000);
+        check(!BoardVision.isMoving(mw,mh,before,after),"Banner-ad changes do not stop gameplay analysis");
+        fill(after,mw,mh,.16f,.615f,.22f,.648f,0xff67ebf7);
+        check(BoardVision.isMoving(mw,mh,before,after),"Changing waiting-box counts or positions stops analysis");
+        BoardVision.Reading synthetic32=syntheticReading(32,2,2);
+        check(synthetic32.gridReliable&&synthetic32.gridSize==32,"Lattice detection distinguishes a 32x32 board");
+        check(synthetic32.columns.length==2&&synthetic32.boxesRead==4&&synthetic32.numbersRead==4,
+                "A two-column queue with two rows does not invent a third row");
+        check(Math.abs(synthetic32.columnX[0]-.423)<.006,"Two-column arrow uses the recentered position");
+        BoardVision.Reading synthetic36=syntheticReading(36,4,3);
+        check(synthetic36.gridReliable&&synthetic36.gridSize==36,"Lattice detection retains 36x36 support");
+        check(BoardVision.colorName(0xfff465d6).equals("Magenta"),"Recorded magenta color is not labeled red");
+        check(BoardVision.colorName(0xfffac8e9).equals("Pink"),"Light pink remains distinct from magenta");
+        check(BoardVision.colorName(0xffbd254a).equals("Red"),"Red remains distinct from magenta");
 
         String reference = args.length > 0 ? args[0] : "tests/fixtures/level224.jpg";
         if (!new File(reference).isFile()) {
@@ -102,6 +153,7 @@ public final class PlannerChecks {
             tokens.add(new BoardVision.Token(Integer.toString(counts[r][c]),x-22,y-19,x+22,y+19));
         }
         BoardVision.Reading reading = BoardVision.read(w,h,pixels,tokens);
+        check(reading.gridReliable && reading.gridSize==36,"Original reference grid is detected rather than assumed");
         for (int c = 0; c < 4; c++) {
             System.out.print("Column " + (c+1) + ": ");
             for (MovePlanner.Box box : reading.columns[c]) System.out.print(box.label()+" [g="+box.group+",hidden="+box.hiddenLink+"] ");
