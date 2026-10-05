@@ -1,59 +1,60 @@
-# CF Helper v0.1
+# CF Helper v0.2
 
-A separate Android overlay helper for Colony Flow. It does not patch Colony Flow and does not auto-tap the game.
+Android overlay helper for Colony Flow. Tap the game yourself; the helper reads a screen capture and suggests one column at a time.
 
-## What v0.1 does
+## New in v0.2
 
-- Starts a movable `CF` floating bubble over the game.
-- Uses Android MediaProjection only after the user grants screen-capture permission.
-- Hides its own overlay before each capture so it does not contaminate the screenshot.
-- Reads the four currently visible Colony Flow box numbers with on-device ML Kit OCR.
-- Samples the 36 x 36 board and groups tile colors locally on the phone.
-- Detects open paths from the board edge and previously cleared cells.
-- Estimates how many tiles of each visible box color are reachable right now.
-- Marks a visible box SAFE only when the current reachable count is at least the number on that box.
-- Recommends one move, then asks for a new analysis after the board changes.
+- Reads the 4 columns and all 3 visible rows, including each number and color.
+- Detects visible vertical and horizontal connectors and treats connected blocks as one selection group.
+- Reads waiting-slot numbers/colors; unreadable occupied slots remain reserved.
+- Looks up to 4 clicks ahead using the visible queues and the sampled board.
+- Shows **LIKELY CLEAR NOW**, **TEMPORARY PARK**, or **WAIT / RESCAN**.
+- Temporary parking is recommended only when a simulated recovery exists within 2 more clicks. The recovery must also clear any newly selected helper blocks.
+- Checks both collection directions to reject routes that only work with one simulated tile order.
+- Shows the return route, estimated remaining quota, peak slots, and an assessment of each column.
+- Keeps 1 slot free by default; uncheck that preference to allow all 5 slots.
+- Shows a non-touchable column arrow for 8 seconds. Hide the panel to see the game.
+- Runs planning in the background and blocks overlapping analyses.
 
-## Level 224 screenshot used for the first calibration
+## Install and use
 
-The supplied screenshot is game version `v1.0.75 - 7076527378` and shows these top boxes:
+1. Install the APK and open CF Helper.
+2. Tap START FLOATING HELPER; grant Display over other apps and screen capture.
+3. Select **Entire screen** if Android offers screen-sharing choices.
+4. Open Colony Flow and wait for the board to become still.
+5. Tap the CF bubble, then Analyze 3 rows + links.
+6. Check that the detected queue numbers and colors match the game.
+7. Tap only the recommended front block, wait for the ants, then Analyze again.
 
-- Pink 16
-- Green 6
-- Pale yellow / cream 51
-- Orange 27
+Debug builds may have a different signing certificate from an older installation. If Android refuses the update, uninstall the older CF Helper first, then install this build.
 
-The current board geometry test finds roughly 212 immediately reachable pale-yellow / cream tiles, while the other three top colors do not have enough open tiles. Therefore the expected first recommendation for that exact screenshot is:
+## Meaning of parking advice
 
-`SAFE PICK: Cream 51` (third visible box)
+A return of “2 more clicks” is an estimate in game moves, not seconds. The planner checks the slot capacity **before** sending a linked group and does not count the same tiles twice. It reserves every member of a linked group until all members finish, which is conservative if the game frees members individually.
 
-The helper intentionally analyzes the screenshot instead of trusting the level number because Colony Flow updates can reshuffle level layouts.
+A displayed route is a preview from this screenshot. Re-analyze after every click because the actual ant collection order, newly revealed boxes, and animations can change it.
 
-## Build in Android Studio
+## Scope and limitations
 
-1. Open this folder as an Android Studio project.
-2. Let Android Studio install Android SDK 35 if it is missing.
-3. Sync Gradle. The project uses Android Gradle Plugin 8.7.3 and Java 17.
-4. Build `app` and install the debug APK on the Android phone.
-5. Open CF Helper and tap `START FLOATING HELPER`.
-6. Grant `Display over other apps` and screen capture.
-7. Open Colony Flow, tap the floating `CF` bubble, then `Analyze current board`.
+- Calibrated to the 36 x 36 board and 4-column portrait layout in the supplied Level 224 / v1.0.75 screenshot.
+- OCR and connector detection are estimates. Read confidence refers to the visible numbers/colors, not a guarantee that a whole level is solvable.
+- Only visible connector bars can be detected. Links hidden under buttons or continuing off-screen may not be verifiable.
+- Unreadable numbers, off-screen linked partners that are detected, and moves without a short recovery are excluded.
+- No prediction invents the color/count of an unseen fourth row.
+- Not a full-level optimal solver. “No short return route” does not prove a level is impossible.
+- No game patch, auto-tap, Accessibility service, or screenshot upload code.
 
-ML Kit text recognition is bundled through Gradle dependency `com.google.mlkit:text-recognition:16.0.1`.
+## Verification
 
-## Build using GitHub Actions
+The planner and pixel interpretation are plain Java, so checks run without Android:
 
-The repository includes `.github/workflows/build-apk.yml`. If this folder is pushed to a GitHub repository, run the `Build Android APK` workflow. The resulting `cf-helper-debug-apk` artifact contains `app-debug.apk`.
+    javac -d .planner-checks app/src/main/java/com/colonyhelper/overlay/MovePlanner.java app/src/main/java/com/colonyhelper/overlay/BoardVision.java tests/PlannerChecks.java
+    java -ea -cp .planner-checks com.colonyhelper.overlay.PlannerChecks
 
-## Current scope and limitations
+Checks cover full trays, linked capacity, shared color supply, short/unsupported parking, and covered partners. Optional local reference-image checks also cover waiting boxes, connectors, unreadable numbers, and multiple resolutions. The reference capture is not included in the repository. Reference-image tests supply known OCR token positions; they validate pixel interpretation and planning, not ML Kit accuracy on a phone.
 
-- Portrait layout is tuned to the same Colony Flow UI proportions as the provided Level 224 screenshot.
-- The board is currently modeled as a 36 x 36 grid.
-- V0.1 is a move-by-move safety assistant, not a full multi-move optimal solver yet.
-- Special mechanics such as linked boxes, locks, question-mark boxes, or unusual layouts need additional detectors in the next version.
-- If no visible box can fully clear, the app may show a cautious progress pick. Re-analyze immediately after that move.
-- The app never presses Colony Flow controls automatically.
+## Build
 
-## Privacy
+Android Gradle Plugin 8.7.3, Gradle 8.9, Android SDK 35, Java 17. On-device OCR uses ML Kit text-recognition 16.0.1.
 
-Screenshots are processed on the device for board color analysis. OCR uses the ML Kit on-device text recognizer. CF Helper does not contain code to upload screenshots to a server.
+GitHub Actions builds on pushes to main or via Build Android APK -> Run workflow. It runs the planner checks, Android compilation, and lint, then uploads cf-helper-debug-apk containing app-debug.apk.

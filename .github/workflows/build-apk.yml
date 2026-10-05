@@ -31,6 +31,12 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Keep debug signing key for later test updates
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: cf-helper-debug-signing-v1
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -39,6 +45,12 @@ jobs:
 
       - name: Install Android 35
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Check planner outcomes
+        run: |
+          mkdir -p .planner-checks
+          javac -d .planner-checks app/src/main/java/com/colonyhelper/overlay/MovePlanner.java app/src/main/java/com/colonyhelper/overlay/BoardVision.java tests/PlannerChecks.java
+          java -ea -cp .planner-checks com.colonyhelper.overlay.PlannerChecks
 
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug :app:lintDebug

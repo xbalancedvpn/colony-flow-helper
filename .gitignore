@@ -1,4 +1,6 @@
 .gradle/
+.planner-checks/
+tests/fixtures/
 **/build/
 local.properties
 .idea/

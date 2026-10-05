@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("On-screen helper for Colony Flow hard levels. It reads the current board, checks exposed colors, and recommends one move at a time. It does not modify or auto-tap the game.");
+        subtitle.setText("Reads all 3 visible rows, connected blocks, and waiting slots. Recommends a column and checks short return routes before suggesting temporary parking. You tap the game yourself.");
         subtitle.setTextSize(16);
         subtitle.setTextColor(Color.DKGRAY);
         subtitle.setGravity(Gravity.CENTER);
@@ -82,7 +82,7 @@ public class MainActivity extends Activity {
         root.addView(status, matchWrap());
 
         TextView note = new TextView(this);
-        note.setText("V0.1 is tuned for the portrait layout shown in your Level 224 screenshot. It re-analyzes after every move, so it does not need to predict the whole level in advance.");
+        note.setText("V0.2 looks up to 4 clicks ahead, with parking limited to 2 more clicks. Choose Entire screen when Android asks. In the game, wait for ants to settle and Analyze again after each move. Predictions cover the visible 3-row portrait layout.");
         note.setTextSize(13);
         note.setTextColor(Color.GRAY);
         note.setPadding(0, dp(18), 0, 0);

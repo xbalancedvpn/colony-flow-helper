@@ -27,6 +27,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -41,6 +42,7 @@ public class OverlayService extends Service {
     private static final String CHANNEL_ID = "cf_helper_capture";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable markerTimeout = this::hideMarker;
 
     private WindowManager windowManager;
     private WindowManager.LayoutParams overlayParams;
@@ -48,6 +50,10 @@ public class OverlayService extends Service {
     private LinearLayout panel;
     private TextView resultText;
     private TextView bubble;
+    private TextView targetMarker;
+    private Button analyzeButton;
+    private CheckBox reserveSlot;
+    private boolean analyzing;
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -178,17 +184,27 @@ public class OverlayService extends Service {
         panelTitle.setPadding(0, 0, 0, dp(8));
         panel.addView(panelTitle, new LinearLayout.LayoutParams(-1, -2));
 
-        Button analyze = new Button(this);
-        analyze.setText("Analyze current board");
-        analyze.setAllCaps(false);
-        analyze.setOnClickListener(v -> captureAndAnalyze());
-        panel.addView(analyze, new LinearLayout.LayoutParams(-1, dp(48)));
+        analyzeButton = new Button(this);
+        analyzeButton.setText("Analyze 3 rows + links");
+        analyzeButton.setAllCaps(false);
+        analyzeButton.setOnClickListener(v -> captureAndAnalyze());
+        panel.addView(analyzeButton, new LinearLayout.LayoutParams(-1, dp(48)));
+
+        reserveSlot = new CheckBox(this);
+        reserveSlot.setText("Keep 1 slot free");
+        reserveSlot.setTextColor(Color.rgb(45, 45, 45));
+        reserveSlot.setChecked(true);
+        reserveSlot.setOnCheckedChangeListener((button, checked) -> {
+            hideMarker();
+            if (!analyzing) showResult("Slot preference changed. Analyze again to update the advice.");
+        });
+        panel.addView(reserveSlot, new LinearLayout.LayoutParams(-1, -2));
 
         ScrollView scroll = new ScrollView(this);
-        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(-1, dp(310));
+        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(-1, dp(330));
         scrollLp.topMargin = dp(8);
         resultText = new TextView(this);
-        resultText.setText("Open a level, wait until the board is still, then tap Analyze.");
+        resultText.setText("Open a level and wait until the board is still. Analyze reads 3 rows, linked blocks, and short parking routes. Columns are counted left to right.");
         resultText.setTextColor(Color.rgb(35, 35, 35));
         resultText.setTextSize(14);
         resultText.setPadding(dp(4), dp(4), dp(4), dp(4));
@@ -200,7 +216,7 @@ public class OverlayService extends Service {
         actions.setPadding(0, dp(8), 0, 0);
 
         Button hide = new Button(this);
-        hide.setText("Hide");
+        hide.setText("Hide panel");
         hide.setAllCaps(false);
         hide.setOnClickListener(v -> panel.setVisibility(View.GONE));
         actions.addView(hide, new LinearLayout.LayoutParams(0, dp(44), 1f));
@@ -267,18 +283,32 @@ public class OverlayService extends Service {
     }
 
     private void captureAndAnalyze() {
+        if (analyzing) return;
         if (imageReader == null) {
             showResult("Capture is not ready. Restart the helper and allow screen capture.");
             return;
         }
-        showResult("Reading board...\nKeep the game still for a moment.");
+        analyzing = true;
+        analyzeButton.setEnabled(false);
+        reserveSlot.setEnabled(false);
+        hideMarker();
+        showResult("Reading 3 rows and connections...\nKeep the game still for a moment.");
         overlayRoot.setVisibility(View.INVISIBLE);
-        handler.postDelayed(() -> tryCapture(0), 260);
+        try {
+            Image stale = imageReader.acquireLatestImage();
+            if (stale != null) stale.close();
+        } catch (IllegalStateException error) {
+            restoreOverlay(); finishAnalysis();
+            showResult("Screen capture ended. Restart the helper.");
+            return;
+        }
+        handler.postDelayed(() -> tryCapture(0), 380);
     }
 
     private void tryCapture(int attempt) {
         if (imageReader == null) {
             restoreOverlay();
+            finishAnalysis();
             return;
         }
         Image image = imageReader.acquireLatestImage();
@@ -287,6 +317,7 @@ public class OverlayService extends Service {
                 handler.postDelayed(() -> tryCapture(attempt + 1), 90);
             } else {
                 restoreOverlay();
+                finishAnalysis();
                 showResult("No screen frame received. Tap Analyze again.");
             }
             return;
@@ -306,6 +337,7 @@ public class OverlayService extends Service {
             screenshot = Bitmap.createBitmap(padded, 0, 0, captureWidth, captureHeight);
             if (padded != screenshot) padded.recycle();
         } catch (Throwable t) {
+            finishAnalysis();
             showResult("Could not decode the captured frame. Tap Analyze again.");
         } finally {
             image.close();
@@ -314,11 +346,56 @@ public class OverlayService extends Service {
 
         if (screenshot == null) return;
         Bitmap finalScreenshot = screenshot;
-        BoardAnalyzer.analyze(screenshot, result -> handler.post(() -> {
-            showResult(result.headline + "\n\n" + result.detail);
-            panel.setVisibility(View.VISIBLE);
-            finalScreenshot.recycle();
+        boolean reserveOne = reserveSlot.isChecked();
+        BoardAnalyzer.analyze(screenshot, reserveOne, result -> handler.post(() -> {
+            try {
+                finishAnalysis();
+                if (overlayRoot == null || panel == null || imageReader == null) return;
+                showResult(result.headline + "\n\n" + result.detail);
+                panel.setVisibility(View.VISIBLE);
+                if (result.column >= 0) showMarker(result.column, result.temporaryPark);
+            } finally {
+                finalScreenshot.recycle();
+            }
         }));
+    }
+
+    private void finishAnalysis() {
+        analyzing = false;
+        if (analyzeButton != null) analyzeButton.setEnabled(true);
+        if (reserveSlot != null) reserveSlot.setEnabled(true);
+    }
+
+    private void showMarker(int column, boolean park) {
+        hideMarker();
+        float[] xs = {.269f, .423f, .577f, .730f};
+        targetMarker = new TextView(this);
+        targetMarker.setText("C" + (column + 1) + " \u2193");
+        targetMarker.setGravity(Gravity.CENTER);
+        targetMarker.setTextSize(12);
+        targetMarker.setTextColor(Color.WHITE);
+        targetMarker.setBackground(roundRect(park ? Color.rgb(167, 99, 12) : Color.rgb(87, 38, 131), 10));
+        int markerWidth = Math.min(dp(62), Math.round(captureWidth * .125f));
+        int markerHeight = Math.min(dp(28), Math.round(captureHeight * .020f));
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(markerWidth, markerHeight,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.TOP | Gravity.LEFT;
+        params.alpha = .75f;
+        params.x = Math.round(captureWidth * xs[column]) - markerWidth / 2;
+        params.y = Math.round(captureHeight * .677f) - markerHeight;
+        try { windowManager.addView(targetMarker, params); }
+        catch (RuntimeException error) { targetMarker = null; }
+        handler.postDelayed(markerTimeout, 8000);
+    }
+
+    private void hideMarker() {
+        handler.removeCallbacks(markerTimeout);
+        if (targetMarker != null) {
+            try { windowManager.removeView(targetMarker); } catch (RuntimeException ignored) { }
+            targetMarker = null;
+        }
     }
 
     private void restoreOverlay() {
@@ -367,6 +444,8 @@ public class OverlayService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        handler.removeCallbacksAndMessages(null);
+        hideMarker();
         if (overlayRoot != null && windowManager != null) {
             try {
                 windowManager.removeView(overlayRoot);
